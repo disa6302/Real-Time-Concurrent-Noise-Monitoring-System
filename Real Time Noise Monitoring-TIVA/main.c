@@ -39,19 +39,16 @@
 #include "driverlib/i2c.h"
 #include "inc/hw_memmap.h"
 
-
 uint16_t display_array_color[8] = {0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
 uint16_t display_array[8]= {0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0};
-// Demo Task declarations
-void demoLEDTask(void *pvParameters);
-void demoSerialTask(void *pvParameters);
-void demoADCTask(void *pvParameters);
-void UARTInit(void);
-void ADCInit(void);
+//Mqueues creation for number of values
+QueueHandle_t xAudioQueue;
+
 
 //Global Variables
 volatile uint8_t address;
 uint32_t ui32Value = 0;
+uint32_t rx_value;
 
 
 
@@ -247,14 +244,32 @@ int main(void)
 
     // Initialize peripherals
     UARTStdioConfig(0, 57600, SYSTEM_CLOCK);
-    ADCInit();
 
+    //Queue for storing ADC Value
+    xAudioQueue = xQueueCreate(10,sizeof(uint32_t));
+    if(xAudioQueue == NULL)
+    {
+        UARTprintf("\r\nAUnable to create message queue\n");
+    }
+    vQueueDelete(xAudioQueue);
+    xAudioQueue = xQueueCreate(10,sizeof(uint32_t));
+        if(xAudioQueue == NULL)
+        {
+            UARTprintf("\r\nAUnable to create message queue\n");
+        }
+
+    ADCInit();
+	
+	//I2C Initialization
+    I2CInit();
+	
     //Creating Tasks
     xTaskCreate(demoADCTask, (const portCHAR *)"ADC",
                     configMINIMAL_STACK_SIZE, NULL, 4, NULL);
 
     xTaskCreate(demoI2CTask, (const portCHAR *)"I2C",
                     configMINIMAL_STACK_SIZE, NULL, 1, NULL); //Lower Priority
+
     vTaskStartScheduler();
     return 0;
 }
@@ -277,9 +292,21 @@ void demoADCTask(void *pvParameters)
         //Read the value from the ADC
         ADCSequenceDataGet(ADC0_BASE, 3, &ui32Value);
 
-        //Log into UART
-        UARTprintf("\r\nADC Value:%d",ui32Value);
-        vTaskDelay(5000 / portTICK_PERIOD_MS); //Value logged every 5 seconds
+        if(xAudioQueue != 0)
+        {
+                //Wait for 10 ticks if Queue becomes full before it can be refilled again
+                if(xQueueSendToBack(xAudioQueue,(void *)&ui32Value,( TickType_t )10)!=pdPASS)
+                {
+                    UARTprintf("\r\nUnable to put value into Queue\n");
+
+                }
+                else
+                {
+                    UARTprintf("\r\nValue put into Queue:%d\n",ui32Value);
+
+                }
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS); //Value logged into queue every 5 seconds
     }
 }
 //void *pvParameters
@@ -319,20 +346,40 @@ void demoI2CTask(void *pvParameters)
 
     //1uS delay
     SysCtlDelay(100);
-    //To Glow GREEN
-    clear();
-	SysCtlDelay(400000);//Delay for 4 secs
-    write_display_intensity_control(LOW);
-    SysCtlDelay(400000);//Delay for 4 secs
-    //To Glow RED
-    clear();
-	SysCtlDelay(400000);//Delay for 4 secs
-    write_display_intensity_control(HIGH);
-    SysCtlDelay(400000);//Delay for 4 secs
-    //To Glow Orange
-    clear();
-	SysCtlDelay(400000);//Delay for 4 secs
-    write_display_intensity_control(MID);
+
+    while(1)
+    {
+        if(xAudioQueue != 0 )
+            {
+                // Receive a message on the created queue.  Block for 10 ticks if a
+                // message is not immediately available.
+                if(xQueueReceive(xAudioQueue, &rx_value,( TickType_t )10))
+                {
+                    UARTprintf("\r\nValue received from Queue:%d\n",rx_value);
+                    if(rx_value<1200)
+                    {
+                        clear();
+                        write_display_intensity_control(LOW);
+                    }
+                    //To blink red
+                    else if(rx_value>1230)
+                    {
+                        clear();
+                        write_display_intensity_control(HIGH);
+                    }
+                    else if(rx_value>1200 && rx_value<1230)
+                    {
+                        clear();
+                        write_display_intensity_control(MID);
+                    }
+                }
+                else
+                {
+                    UARTprintf("\r\nUnable to receive value from queue\n");
+                }
+            }
+            vTaskDelay(5000 / portTICK_PERIOD_MS); //LED Matrix displayed every 5 seconds in sync with ADC
+    }
 }
 /*  ASSERT() Error function
  *
