@@ -19,7 +19,18 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+
+
 #include "message.h"
+
 
 #define LOG_QUEUE "/log_queue"
 #define SCKT_LOG_QUEUE "/sock_log_queue"
@@ -27,6 +38,8 @@
 #define PATTERN_QUEUE "/pattern_queue"
 #define DECISION_QUEUE "/decision_queue"
 #define MAX_LOG_SIZE     9999
+
+#define HOST_ADDR "10.0.0.166"
 
 char logbuff[MAX_LOG_SIZE];
 
@@ -57,11 +70,22 @@ static mqd_t decision_queue;
 static volatile sig_atomic_t counter =0;
 FILE *fp;
 
+int sockfd,connectionfd,ret;
+
+int n;
+
+char recv_sockbuff[1024];
 
 logpacket msg_main, msg_socket, msg_eeprom;
 
 
+struct sock_struct
+{
+	uint32_t len;
+	char sock_buff[256];
+};
 
+struct sock_struct sock_val;
 //Create Following Tasks
 /* 
 1.Socket Task
@@ -160,17 +184,29 @@ void *app_socket_task(void *args) // SocketThread/Task
 {
     uint32_t audio_val = 0;
     printf("\nEntered Socket Task\n");
+
     char recv_buff[256];
-    strcpy(recv_buff,"Audio Value: 1996");
-    if(1==sscanf(recv_buff,"%*[^0123456789]%d",&audio_val))
-    {
-        printf("\nAudio value is %d\n",audio_val);
-    }
+    
     //Connect and establish Socket comm
     while(1)
     {
         usleep(5000000);
         //Wait on sock.recv or read and update audio val and then signal other tasks
+
+
+        //To Do: Error Checking for Sockets
+        n = read(connectionfd,&sock_val,sizeof(sock_val));
+		printf("number of bytes read:%d\n",n);
+		if(n<0)
+		{
+			perror("Receive error\n");
+		}
+		printf("What I received from client..:%s with size %d\n",sock_val.sock_buff,sock_val.len);
+		memcpy(recv_buff,sock_val.sock_buff,(sock_val.len)*sizeof(char));
+	    if(1==sscanf(recv_buff,"%*[^0123456789]%d",&audio_val))
+	    {
+	        printf("\nAudio value is %d\n",audio_val);
+	    }
         gettimeofday(&msg_socket.time_stamp, NULL); 
         
         if(!(audio_val %2000))
@@ -179,15 +215,14 @@ void *app_socket_task(void *args) // SocketThread/Task
             printf("\nHigh Noise Intensity!!!");
             sprintf(msg_socket.logmsg,"High Audio Intensity : %d !! ", audio_val);
             api_send_socket_log(msg_socket); 
-            pthread_cond_signal(&sig_from_socket);
         }
         else
         {
             sprintf(msg_socket.logmsg,"Received Audio value is : %d !!", audio_val);
             api_send_socket_log(msg_socket); 
-
-            audio_val++;
         }
+        //To Do  : Signal EEPROM Only upon a condition
+        pthread_cond_signal(&sig_from_socket);
 
     }
 }
@@ -195,8 +230,17 @@ void *app_socket_task(void *args) // SocketThread/Task
 
 void *app_eeprom_task(void *args) // SocketThread/Task
 {
+    uint8_t soc_recv_cnt = 0;
     pthread_cond_wait(&sig_from_socket, &sig_socket_mutex);
     printf("\nEntered EEPROM Task\n");
+    while(1)
+    {
+    	pthread_cond_wait(&sig_from_socket, &sig_socket_mutex);
+    	if(!(soc_recv_cnt %253))
+    		soc_recv_cnt = 0;
+    	soc_recv_cnt++;
+    	printf("\n Performing EEPROM Write Task After Socket recv count %d\n",soc_recv_cnt);
+    }
 
 }
 
@@ -254,8 +298,19 @@ void *app_sync_logger(void *args) // SocketThread/Task
 
 void *app_decision_task(void *args) // SocketThread/Task
 {
+	uint8_t soc_recv_cnt = 0;
     printf("\nEntered Decision Task\n");
+    while(1)
+    {
+    	pthread_cond_wait(&sig_from_socket, &sig_socket_mutex);
+    	if(!(soc_recv_cnt %253))
+    		soc_recv_cnt = 0;
+    	soc_recv_cnt++;
+    	printf("\n Performing Decision Task After Socket recv count %d\n",soc_recv_cnt);
+    }
 }
+
+
 
 int main(int argc, char **argv)
 {
@@ -280,6 +335,25 @@ int main(int argc, char **argv)
     
     printf("%ld",sizeof(argv[1]));
     printf("%s",logfname);
+
+    
+	char buffer[1024];
+	int n;
+	long counter = 0;
+	struct sockaddr_in lserveraddr;
+	if((sockfd = socket(AF_INET,SOCK_STREAM,0))<0)
+	{
+		perror("Error opening socket\n");
+		return 0;
+	}
+	lserveraddr.sin_family = AF_INET;
+	lserveraddr.sin_addr.s_addr = inet_addr(HOST_ADDR);
+	lserveraddr.sin_port = htons(5000);
+
+	//To configure the socket options for REUSEADDR & Timeout 
+	bind(sockfd,(struct sockaddr*)&lserveraddr,sizeof(lserveraddr));
+	listen(sockfd,10);
+	connectionfd = accept(sockfd,(struct sockaddr*)NULL,NULL);
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -372,7 +446,7 @@ int main(int argc, char **argv)
     }    
     //To modify attributes to improve scheduling efficiency and task synchronization
 
-    /* Creating Temp Sensor Thread */
+    /* Creating Socket Thread */
 
     if(pthread_create(&socket_thread, &attr, (void*)&app_socket_task, NULL))
     {
@@ -380,7 +454,7 @@ int main(int argc, char **argv)
      
     }
 
-    /* Creating Light Sensor Thread */
+    /* Creating EEPROM Thread */
     if(pthread_create(&eeprom_thread, &attr, (void*)&app_eeprom_task, NULL))
     {
         printf("\nERR: Failure to create thread\n");
@@ -393,7 +467,7 @@ int main(int argc, char **argv)
         printf("\nERR: Failure to create thread\n");
    
     }
-    
+    /* Creating Decision Thread */
     if(pthread_create(&decision_thread, &attr, (void*)&app_decision_task, NULL))
     {
         printf("\nERR: Failure to create thread\n");

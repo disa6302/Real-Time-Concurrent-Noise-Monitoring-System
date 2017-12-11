@@ -10,7 +10,7 @@ CFLAGS= -O0 -g -w -pthread
 
 LIBS = -lrt -lm
 
-OUTPUT=main_exec
+OUTPUT=main_exec 
 
 CFILES= main.c
 
@@ -25,6 +25,8 @@ clean:
 
 main_exec:main.o
 	$(CC) $(CFLAGS) -o $@ main.o $(LIBS)
+
+
 
 .c.o:
 	$(CC) $(CFLAGS) -c $<
