@@ -39,6 +39,9 @@ pthread_t decision_thread;
 pthread_cond_t sig_logger;
 pthread_mutex_t logger_mutex;
 
+pthread_cond_t sig_from_socket;
+pthread_mutex_t sig_socket_mutex;
+
 struct mq_attr mq_attr_log_queue;
 struct mq_attr mq_attr_sock_queue;
 struct mq_attr mq_attr_eeprom_queue;
@@ -76,8 +79,6 @@ logpacket msg_main, msg_socket, msg_eeprom;
 2.MQ for EEPROM-Logger tasks
 3.MQ for Pattern Task Logger to read from EEPROM/Logger task
 */ 
-
-
 //Exit Handler
 void exit_handler(int sig) {
     if (sig != SIGINT) {
@@ -105,7 +106,6 @@ void exit_handler(int sig) {
     exit(0);
 }
 
-
 //API For Logging from Socket Task
 enum Status api_send_socket_log(logpacket msg)
 {
@@ -123,8 +123,7 @@ enum Status api_send_socket_log(logpacket msg)
 
     return SUCCESS;
 }
-
-//API for Logging from EEPROM Task
+//API For Logging from EEPROM Task
 enum Status api_send_eeprom_log(logpacket msg)
 {
     uint8_t status;
@@ -140,8 +139,7 @@ enum Status api_send_eeprom_log(logpacket msg)
 
     return SUCCESS;
 }
-
-//API For logging from MAIN
+//API For Logging from MAIN Task
 enum Status api_send_main_log(logpacket msg)
 {
     uint8_t status;
@@ -162,16 +160,43 @@ void *app_socket_task(void *args) // SocketThread/Task
 {
     uint32_t audio_val = 1996;
     printf("\nEntered Socket Task\n");
+    //Connect and establish Socket comm
+    while(1)
+    {
+        usleep(5000000);
+        //Wait on sock.recv or read and update audio val and then signal other tasks
+        gettimeofday(&msg_socket.time_stamp, NULL); 
+
+        if(!(audio_val %2000))
+        {
+            audio_val = 0;
+            printf("\nHigh Noise Intensity!!!");
+            sprintf(msg_socket.logmsg,"High Audio Intensity : %d !! ", audio_val);
+            api_send_socket_log(msg_socket); 
+            pthread_cond_signal(&sig_from_socket);
+        }
+        else
+        {
+            sprintf(msg_socket.logmsg,"Received Audio value is : %d !!", audio_val);
+            api_send_socket_log(msg_socket); 
+
+            audio_val++;
+        }
+
+    }
 }
 
 
 void *app_eeprom_task(void *args) // SocketThread/Task
 {
+    pthread_cond_wait(&sig_from_socket, &sig_socket_mutex);
     printf("\nEntered EEPROM Task\n");
+
 }
 
 void *app_sync_logger(void *args) // SocketThread/Task
 {
+    
     printf("\nEntered Logger Task\n");
     if(!args)
     {
@@ -193,6 +218,29 @@ void *app_sync_logger(void *args) // SocketThread/Task
     while(1)
     {
         pthread_cond_wait(&sig_logger, &logger_mutex);
+        logpacket temp; 
+        temp.req_type = -1;
+        status = mq_receive(log_queue,(logpacket*)&temp, sizeof(temp), NULL);
+        printf("\nLog Status %d\n",status);
+        if(temp.logmsg !=NULL)
+        {
+            if(status >0)
+            {
+                printf("\nLog Queue message received\n");
+                if(temp.sourceid == SRC_MAIN)
+                {
+                    sprintf(logbuff,"\n[ %ld sec, %ld usecs] MAIN :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
+                    strncat(logbuff, temp.logmsg, strlen(temp.logmsg));
+                    fwrite(logbuff,1, strlen(logbuff)*sizeof(char),fp);
+                }
+                if(temp.sourceid == SRC_SOCKET)
+                {
+                    sprintf(logbuff,"\n[ %ld sec, %ld usecs] SOCKET :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
+                    strncat(logbuff, temp.logmsg, strlen(temp.logmsg));
+                    fwrite(logbuff,1, strlen(logbuff)*sizeof(char),fp);
+                }
+            }
+        }
         usleep(usecs);    
 
     }
@@ -214,15 +262,15 @@ int main(int argc, char **argv)
     char *logfname = malloc(50 *sizeof(char));
     if(!logfname)
     {
-    	printf("\nERR:Malloc Failed!\n");
-		return 1;
+        printf("\nERR:Malloc Failed!\n");
+        return 1;
 
     }
     if(!memcpy(logfname,argv[1],strlen(argv[1])))
-  	{
-  		printf("\nERR:Memcpy Failed!\n");
-		return 1;
-  	}
+    {
+        printf("\nERR:Memcpy Failed!\n");
+        return 1;
+    }
     
     printf("%ld",sizeof(argv[1]));
     printf("%s",logfname);
@@ -255,6 +303,10 @@ int main(int argc, char **argv)
 
     mq_unlink(LOG_QUEUE);
     log_queue = mq_open(LOG_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_log_queue);
+    /*mq_unlink(SCKT_LOG_QUEUE);
+    sock_log_queue = mq_open(SCKT_LOG_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_sock_queue);
+    mq_unlink(EEPROM_LOG_QUEUE);
+    eeprom_log_queue = mq_open(EEPROM_LOG_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_eeprom_queue);*/
     mq_unlink(PATTERN_QUEUE);
     pattern_queue = mq_open(PATTERN_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_pattern_queue);
     mq_unlink(DECISION_QUEUE);
@@ -300,28 +352,39 @@ int main(int argc, char **argv)
         printf("\nERR: Failure to init condition\n");
         
     }
-    /*
+
+    if(pthread_cond_init(&sig_from_socket,NULL))
+    {
+        printf("\nERR: Failure to init condition\n");
+        
+    }
+    
+    if(pthread_mutex_init(&sig_socket_mutex,NULL))
+    {
+        printf("\nERR: Failure to init condition\n");
+        
+    }    
     //To modify attributes to improve scheduling efficiency and task synchronization
 
     /* Creating Temp Sensor Thread */
 
     if(pthread_create(&socket_thread, &attr, (void*)&app_socket_task, NULL))
     {
-    	printf("\nERR: Failure to create socket thread\n");
+        printf("\nERR: Failure to create socket thread\n");
      
     }
 
     /* Creating Light Sensor Thread */
     if(pthread_create(&eeprom_thread, &attr, (void*)&app_eeprom_task, NULL))
     {
-    	printf("\nERR: Failure to create thread\n");
-    	 
+        printf("\nERR: Failure to create thread\n");
+         
     }
     
     /* Creating Synchronization Logger Thread */
     if(pthread_create(&synclogger_thread, &attr, (void*)&app_sync_logger, logfname))
     {
-    	printf("\nERR: Failure to create thread\n");
+        printf("\nERR: Failure to create thread\n");
    
     }
     
@@ -339,11 +402,12 @@ int main(int argc, char **argv)
         api_send_main_log(msg_main);    
     }
 
+    //Synchronization with the main thread
     pthread_join(socket_thread, NULL);
- 	pthread_join(eeprom_thread, NULL);
-	pthread_join(synclogger_thread, NULL);
+    pthread_join(eeprom_thread, NULL);
+    pthread_join(synclogger_thread, NULL);
     pthread_join(decision_thread, NULL);
     exit_handler(SIGINT);
-	return 0;
+    return 0;
 
 }
