@@ -158,15 +158,21 @@ enum Status api_send_main_log(logpacket msg)
 
 void *app_socket_task(void *args) // SocketThread/Task
 {
-    uint32_t audio_val = 1996;
+    uint32_t audio_val = 0;
     printf("\nEntered Socket Task\n");
+    char recv_buff[256];
+    strcpy(recv_buff,"Audio Value: 1996");
+    if(1==sscanf(recv_buff,"%*[^0123456789]%d",&audio_val))
+    {
+        printf("\nAudio value is %d\n",audio_val);
+    }
     //Connect and establish Socket comm
     while(1)
     {
         usleep(5000000);
         //Wait on sock.recv or read and update audio val and then signal other tasks
         gettimeofday(&msg_socket.time_stamp, NULL); 
-
+        
         if(!(audio_val %2000))
         {
             audio_val = 0;
