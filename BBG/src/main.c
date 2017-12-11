@@ -203,7 +203,7 @@ enum Status api_send_main_log(logpacket msg)
     return SUCCESS;
 }
 
-//To DO: Remote API Support
+
 enum Status socket_request_hdlr(struct sock_struct recv_msg)
 {
     uint32_t audio_val = 0;
@@ -307,7 +307,7 @@ void *app_sync_logger(void *args) // SocketThread/Task
     uint32_t usecs;
     usecs = 2000000;
 
-    //Wait on any Thread to log
+    //Wait on temperature or light Thread to log
     while(1)
     {
         pthread_cond_wait(&sig_logger, &logger_mutex);
