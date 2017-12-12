@@ -13,10 +13,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <strings.h>
 #include "main.h"
 #include "drivers/pinout.h"
 #include "driverlib/gpio.h"
 #include "utils/uartstdio.h"
+#include "driverlib/uart.h"
 
 
 // TivaWare includes
@@ -39,18 +42,42 @@
 #include "driverlib/i2c.h"
 #include "inc/hw_memmap.h"
 
+
 uint16_t display_array_color[8] = {0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
 uint16_t display_array[8]= {0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0};
+
 //Mqueues creation for number of values
 QueueHandle_t xAudioQueue;
 
+typedef enum reqtype_t{
+DEFAULT,
+REQ_REMOTE_API,
+REQ_ERR_REC,
+REQ_PATTERN_DATA,
+TX_AUDIO_DATA,
+TX_ERR_LOG,
+TX_INIT_LOG
+}request_t;
+
+//Structure for socket packet
+struct sock_struct
+{
+    uint32_t len;
+    request_t cmd;
+    char sock_buff[256];
+};
+
+
+
+
+struct sock_struct sock_val;
 
 //Global Variables
 volatile uint8_t address;
 uint32_t ui32Value = 0;
 uint32_t rx_value;
 
-
+uint32_t output_clock_rate_hz;
 
 //ADC Initialization
 void ADCInit()
@@ -106,6 +133,28 @@ void I2CInit()
 
 
     ROM_I2CMasterInitExpClk(I2C1_BASE, SYSTEM_CLOCK, true); //400kbps
+
+}
+
+void UARTInit()
+{
+    ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_UART3);
+    ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+
+    // Set GPIO A4 and A5 as UART pins.
+
+    GPIOPinConfigure(GPIO_PA4_U3RX);
+    GPIOPinConfigure(GPIO_PA5_U3TX);
+    ROM_GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_4 | GPIO_PIN_5);
+
+
+    // Configure the UART for 57600, 8-bit, 1 stop bit operation.
+
+    ROM_UARTConfigSetExpClk(UART3_BASE, output_clock_rate_hz, 115200,
+                            (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE |
+                                    UART_CONFIG_PAR_NONE));
+
+//    UART_SendData(d,strlen("TIVA MESSAGE"));
 
 }
 
@@ -226,12 +275,26 @@ void clear()
 {
     writeDisplay();
 }
+
+void UART_SendData(struct sock_struct sock, int numOfCharacters)
+{
+       unsigned char *myPtr = (unsigned char *)&sock;
+       const unsigned char *byteToSend;
+       int numberOfBytes = sizeof(sock)-(256-numOfCharacters);
+       byteToSend=myPtr;
+       while(numberOfBytes--)
+       {
+           //UARTprintf("Byte %d %c ",numberOfBytes,*byteToSend);
+           SysCtlDelay(2000);
+           UARTCharPutNonBlocking(UART3_BASE,*byteToSend);
+           ++byteToSend;
+       }
+}
+
 // Main function
 int main(void)
 {
     // Initialize system clock to 120 MHz
-
-    uint32_t output_clock_rate_hz;
     output_clock_rate_hz = ROM_SysCtlClockFreqSet(
                                (SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
                                 SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480),
@@ -243,7 +306,7 @@ int main(void)
     PinoutSet(false, false);
 
     // Initialize peripherals
-    UARTStdioConfig(0, 57600, SYSTEM_CLOCK);
+    UARTStdioConfig(0, 115200, SYSTEM_CLOCK);
 
     //Queue for storing ADC Value
     xAudioQueue = xQueueCreate(10,sizeof(uint32_t));
@@ -262,15 +325,26 @@ int main(void)
 	
 	//I2C Initialization
     I2CInit();
+
+    //UART Initialization
+    UARTInit();
+
 	
     //Creating Tasks
-    xTaskCreate(demoADCTask, (const portCHAR *)"ADC",
+    /*xTaskCreate(demoADCTask, (const portCHAR *)"ADC",
                     configMINIMAL_STACK_SIZE, NULL, 4, NULL);
 
     xTaskCreate(demoI2CTask, (const portCHAR *)"I2C",
-                    configMINIMAL_STACK_SIZE, NULL, 1, NULL); //Lower Priority
+                    configMINIMAL_STACK_SIZE, NULL, 1, NULL); //Lower Priority*/
 
-    vTaskStartScheduler();
+    bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+    strncpy(sock_val.sock_buff,"Initialization of TIVA-C Board!!",strlen("Initialization of TIVA-C Board!!"));
+    sock_val.len = strlen(sock_val.sock_buff);
+    sock_val.cmd = TX_INIT_LOG;
+    UART_SendData(sock_val,strlen("Initialization of TIVA-C Board!!"));
+
+
+   // vTaskStartScheduler();
     return 0;
 }
 
