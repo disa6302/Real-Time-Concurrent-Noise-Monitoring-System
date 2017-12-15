@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -43,10 +44,29 @@
 #include "inc/hw_memmap.h"
 
 
+#define  I2CNOTIFVAL 0
+//Structure for socket packet
+struct sock_struct
+{
+    uint32_t len;
+    uint32_t cmd;
+    char sock_buff[256];
+};
+char temp_buff[18];
+
+void UART_Send_Command(char *buffer);
+void UART_Send_Packet(struct sock_struct sock, int numOfCharacters);
+
+#define SSID_NAME  "HOME-C345-2.4"
+#define PASSKEY    "curve9567awhile"
+#define PORTNUM "5000"
+#define IPADDRESS "10.0.0.165"
+
+TaskHandle_t ADCTaskHandle;
+TaskHandle_t I2CTaskHandle;
 uint16_t display_array_color[8] = {0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
 uint16_t display_array[8]= {0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0};
 
-//Mqueues creation for number of values
 QueueHandle_t xAudioQueue;
 
 typedef enum reqtype_t{
@@ -59,15 +79,10 @@ TX_ERR_LOG,
 TX_INIT_LOG
 }request_t;
 
-//Structure for socket packet
-struct sock_struct
-{
-    uint32_t len;
-    request_t cmd;
-    char sock_buff[256];
-};
 
 
+int ADCInitFlag = 1;
+int LEDInitFlag = 1;
 
 
 struct sock_struct sock_val;
@@ -76,7 +91,7 @@ struct sock_struct sock_val;
 volatile uint8_t address;
 uint32_t ui32Value = 0;
 uint32_t rx_value;
-
+uint32_t ulNotifiedValue;
 uint32_t output_clock_rate_hz;
 
 //ADC Initialization
@@ -135,6 +150,7 @@ void I2CInit()
     ROM_I2CMasterInitExpClk(I2C1_BASE, SYSTEM_CLOCK, true); //400kbps
 
 }
+
 
 void UARTInit()
 {
@@ -276,7 +292,7 @@ void clear()
     writeDisplay();
 }
 
-void UART_SendData(struct sock_struct sock, int numOfCharacters)
+void UART_Send_Packet(struct sock_struct sock, int numOfCharacters)
 {
        unsigned char *myPtr = (unsigned char *)&sock;
        const unsigned char *byteToSend;
@@ -284,16 +300,45 @@ void UART_SendData(struct sock_struct sock, int numOfCharacters)
        byteToSend=myPtr;
        while(numberOfBytes--)
        {
-           //UARTprintf("Byte %d %c ",numberOfBytes,*byteToSend);
+           //UARTprintf("%c ",numberOfBytes,*byteToSend);
            SysCtlDelay(2000);
            UARTCharPutNonBlocking(UART3_BASE,*byteToSend);
            ++byteToSend;
        }
 }
 
+void UART_Send_Command(char *buffer)
+{
+    int lengthOfBuffer = strlen(buffer);
+    while(lengthOfBuffer--)
+    {
+        SysCtlDelay(2000);
+        UARTCharPutNonBlocking(UART3_BASE,*buffer);
+        buffer++;
+    }
+}
+
+
+
+void ESPInit()
+{
+    UART_Send_Command("AT\r\n");
+    SysCtlDelay(500000);
+    UART_Send_Command("AT+CWMODE=1\r\n");
+    SysCtlDelay(800000);
+    UART_Send_Command("AT+CIPMODE=0\r\n");
+    SysCtlDelay(800000);
+    UART_Send_Command("AT+CIPMUX=0\r\n");
+    SysCtlDelay(800000);
+}
+
+
+
+
 // Main function
 int main(void)
 {
+
     // Initialize system clock to 120 MHz
     output_clock_rate_hz = ROM_SysCtlClockFreqSet(
                                (SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
@@ -306,7 +351,7 @@ int main(void)
     PinoutSet(false, false);
 
     // Initialize peripherals
-    UARTStdioConfig(0, 115200, SYSTEM_CLOCK);
+    UARTStdioConfig(0, 57600, SYSTEM_CLOCK);
 
     //Queue for storing ADC Value
     xAudioQueue = xQueueCreate(10,sizeof(uint32_t));
@@ -314,46 +359,58 @@ int main(void)
     {
         UARTprintf("\r\nAUnable to create message queue\n");
     }
-    vQueueDelete(xAudioQueue);
-    xAudioQueue = xQueueCreate(10,sizeof(uint32_t));
-        if(xAudioQueue == NULL)
-        {
-            UARTprintf("\r\nAUnable to create message queue\n");
-        }
+
 
     ADCInit();
-	
-	//I2C Initialization
+
+    //I2C Initialization
     I2CInit();
 
     //UART Initialization
     UARTInit();
 
-	
+
+    //ESP Initialization
+    ESPInit();
+
     //Creating Tasks
-    /*xTaskCreate(demoADCTask, (const portCHAR *)"ADC",
-                    configMINIMAL_STACK_SIZE, NULL, 4, NULL);
+    xTaskCreate(demoADCTask, (const portCHAR *)"ADC",
+                    configMINIMAL_STACK_SIZE*2, NULL, 4, &ADCTaskHandle);
 
     xTaskCreate(demoI2CTask, (const portCHAR *)"I2C",
-                    configMINIMAL_STACK_SIZE, NULL, 1, NULL); //Lower Priority*/
-
-    bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
-    strncpy(sock_val.sock_buff,"Initialization of TIVA-C Board!!",strlen("Initialization of TIVA-C Board!!"));
-    sock_val.len = strlen(sock_val.sock_buff);
-    sock_val.cmd = TX_INIT_LOG;
-    UART_SendData(sock_val,strlen("Initialization of TIVA-C Board!!"));
+                    configMINIMAL_STACK_SIZE*2, NULL, 3, &I2CTaskHandle); //Lower Priority
 
 
-   // vTaskStartScheduler();
+
+
+    vTaskStartScheduler();
     return 0;
 }
 
-
 void demoADCTask(void *pvParameters)
 {
-
+    char TXBuffer[30];
     while(1)
     {
+        if(ADCInitFlag)
+        {
+            bzero(TXBuffer,sizeof(TXBuffer));
+            sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+            UART_Send_Command(TXBuffer);
+            SysCtlDelay(300000000);
+            bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+            sprintf(sock_val.sock_buff,"ADC Initialization Done!");
+            sock_val.len = strlen(sock_val.sock_buff);
+            sock_val.cmd = (uint32_t)(TX_INIT_LOG);
+            bzero(TXBuffer,sizeof(TXBuffer));
+            sprintf((char*)TXBuffer, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
+            UART_Send_Command(TXBuffer);
+            SysCtlDelay(800000);
+
+            UART_Send_Packet(sock_val,sock_val.len);
+            SysCtlDelay(200000000);
+            ADCInitFlag = 0;
+        }
         //Wait for the ADC0 module to be ready
         while(!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0));
 
@@ -365,28 +422,47 @@ void demoADCTask(void *pvParameters)
 
         //Read the value from the ADC
         ADCSequenceDataGet(ADC0_BASE, 3, &ui32Value);
+        bzero(TXBuffer,sizeof(TXBuffer));
+        sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+        UART_Send_Command(TXBuffer);
+        SysCtlDelay(300000000);
+        bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+        sprintf(sock_val.sock_buff,"ADC Intensity : %d !! ", ui32Value);
+        sock_val.len = strlen(sock_val.sock_buff);
+        sock_val.cmd = (uint32_t)(TX_AUDIO_DATA);
+        bzero(temp_buff,sizeof(temp_buff));
+        sprintf((char*)temp_buff, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
 
+        UART_Send_Command(temp_buff);
+        SysCtlDelay(800000);
+
+
+
+        UART_Send_Packet(sock_val,sock_val.len);
         if(xAudioQueue != 0)
         {
                 //Wait for 10 ticks if Queue becomes full before it can be refilled again
                 if(xQueueSendToBack(xAudioQueue,(void *)&ui32Value,( TickType_t )10)!=pdPASS)
                 {
-                    UARTprintf("\r\nUnable to put value into Queue\n");
+                    UARTprintf("\r\n[Audio Log]Unable to put value into Queue\n");
 
                 }
                 else
                 {
-                    UARTprintf("\r\nValue put into Queue:%d\n",ui32Value);
-
+                    UARTprintf("\r\n[Audio Log]Value put into Queue:%d\n",ui32Value);
+                    //xTaskNotify(ADCTaskHandle, I2CNOTIFVAL, eIncrement);
                 }
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS); //Value logged into queue every 5 seconds
+
     }
+   // vTaskDelete(NULL); /*Deletes Current task and frees up memory*/
 }
+
 //void *pvParameters
 void demoI2CTask(void *pvParameters)
 {
-
+    char TXBuffer[30];
     //Configure System Setup Register
     ROM_I2CMasterSlaveAddrSet(I2C1_BASE, SLAVE_ADDR, false);
     ROM_I2CMasterControl(I2C1_BASE, I2C_MASTER_CMD_BURST_SEND_START);
@@ -417,44 +493,113 @@ void demoI2CTask(void *pvParameters)
 
     //Set brightness to maximum value
     setBrightness(15);
-
     //1uS delay
     SysCtlDelay(100);
 
     while(1)
     {
+       // xTaskNotifyWait(0x00, ULONG_MAX, &ulNotifiedValue, portMAX_DELAY); /*Blocks indefinitely waiting for notification*/
+        if(LEDInitFlag)
+        {
+        bzero(TXBuffer,sizeof(TXBuffer));
+        sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+        UART_Send_Command(TXBuffer);
+        SysCtlDelay(300000000);
+        bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+        sprintf(sock_val.sock_buff,"LED Matrix Initialization Done!");
+        sock_val.len = strlen(sock_val.sock_buff);
+        sock_val.cmd = (uint32_t)(TX_INIT_LOG);
+        bzero(TXBuffer,sizeof(TXBuffer));
+        sprintf((char*)TXBuffer, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
+        UART_Send_Command(TXBuffer);
+        SysCtlDelay(800000);
+
+        UART_Send_Packet(sock_val,sock_val.len);
+        SysCtlDelay(200000000);
+        LEDInitFlag = 0;
+        }
+        //UARTprintf("\r\nEntered while loop of I2C\n");
         if(xAudioQueue != 0 )
-            {
+        {
+
                 // Receive a message on the created queue.  Block for 10 ticks if a
                 // message is not immediately available.
                 if(xQueueReceive(xAudioQueue, &rx_value,( TickType_t )10))
                 {
-                    UARTprintf("\r\nValue received from Queue:%d\n",rx_value);
-                    if(rx_value<1200)
+                    UARTprintf("\r\n[LED Log]Value received from Queue:%d\n",rx_value);
+                    if(rx_value<1250)
                     {
                         clear();
                         write_display_intensity_control(LOW);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(300000000);
+                        bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+                        sprintf(sock_val.sock_buff,"LED Matrix Glowing Green!");
+                        sock_val.len = strlen(sock_val.sock_buff);
+                        sock_val.cmd = (uint32_t)(TX_INIT_LOG);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(800000);
+
+                        UART_Send_Packet(sock_val,sock_val.len);
+                        SysCtlDelay(200000000);
                     }
                     //To blink red
-                    else if(rx_value>1230)
+                    else if(rx_value>1300)
                     {
                         clear();
                         write_display_intensity_control(HIGH);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(300000000);
+                        bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+                        sprintf(sock_val.sock_buff,"LED Matrix Glowing Red!");
+                        sock_val.len = strlen(sock_val.sock_buff);
+                        sock_val.cmd = (uint32_t)(TX_INIT_LOG);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(800000);
+
+                        UART_Send_Packet(sock_val,sock_val.len);
+                        SysCtlDelay(200000000);
                     }
-                    else if(rx_value>1200 && rx_value<1230)
+                    else if(rx_value>1250 && rx_value<1300)
                     {
                         clear();
                         write_display_intensity_control(MID);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSTART=\"TCP\",\"%s\",5000\r\n", (const char*)(IPADDRESS));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(300000000);
+                        bzero(sock_val.sock_buff,sizeof(sock_val.sock_buff));
+                        sprintf(sock_val.sock_buff,"LED Matrix Glowing Orange!");
+                        sock_val.len = strlen(sock_val.sock_buff);
+                        sock_val.cmd = (uint32_t)(TX_INIT_LOG);
+                        bzero(TXBuffer,sizeof(TXBuffer));
+                        sprintf((char*)TXBuffer, "AT+CIPSEND=%d\r\n",sizeof(sock_val)-(256-sock_val.len));
+                        UART_Send_Command(TXBuffer);
+                        SysCtlDelay(800000);
+
+                        UART_Send_Packet(sock_val,sock_val.len);
+                        SysCtlDelay(200000000);
                     }
                 }
                 else
                 {
-                    UARTprintf("\r\nUnable to receive value from queue\n");
+                    UARTprintf("\r\n[LED Log]Unable to receive value from queue\n");
                 }
             }
             vTaskDelay(5000 / portTICK_PERIOD_MS); //LED Matrix displayed every 5 seconds in sync with ADC
     }
+   // vTaskDelete(NULL); /*Deletes Current task and frees up memory*/
 }
+
+
 /*  ASSERT() Error function
  *
  *  failed ASSERTS() from driverlib/debug.h are executed in this function
