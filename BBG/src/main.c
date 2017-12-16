@@ -37,9 +37,10 @@
 #define EEPROM_LOG_QUEUE "/eeprom_log_queue"
 #define PATTERN_QUEUE "/pattern_queue"
 #define DECISION_QUEUE "/decision_queue"
+#define HB_SOCK_QUEUE "/hb_sock_queue"
 #define MAX_LOG_SIZE     9999
-
-#define HOST_ADDR "10.0.0.166"
+#define AUDIO_H_THRESHOLD 1300
+#define HOST_ADDR "10.0.0.165"
 
 char logbuff[MAX_LOG_SIZE];
 
@@ -61,18 +62,19 @@ struct mq_attr mq_attr_sock_queue;
 struct mq_attr mq_attr_eeprom_queue;
 struct mq_attr mq_attr_pattern_queue;
 struct mq_attr mq_attr_decision_queue;
-
+struct mq_attr mq_attr_hb_sock_queue;
 static mqd_t log_queue;
 static mqd_t sock_log_queue;
 static mqd_t eeprom_log_queue;
 static mqd_t pattern_queue;
 static mqd_t decision_queue;
-
+static mqd_t hb_sock_queue;
+uint8_t hb_sock_cnt;
 static volatile sig_atomic_t counter =0;
 FILE *fp;
-
+static volatile sig_atomic_t sock_flag = 0;
 int sockfd,connectionfd,ret;
-
+uint8_t hb_temp_cnt;
 int n;
 
 char recv_sockbuff[1024];
@@ -168,7 +170,21 @@ enum Status api_send_socket_dec(logpacket msg)
 
     return SUCCESS;
 }
+enum Status api_send_dec_log(logpacket msg)
+{
+    uint8_t status;
+    msg.sourceid = SRC_DECISION;
+    
+    status=mq_send(log_queue, (const logpacket*)&msg, sizeof(msg),1);
+    if(status == -1)
+    {
+        printf("\nERR: Decision Task was unable to send log message\n");
+        return FAIL;
+    }
+    pthread_cond_signal(&sig_logger);
 
+    return SUCCESS;
+}
 
 //API For Logging from EEPROM Task
 enum Status api_send_eeprom_log(logpacket msg)
@@ -223,16 +239,16 @@ enum Status socket_request_hdlr(struct sock_struct recv_msg)
             }
             gettimeofday(&msg_socket.time_stamp, NULL); 
             
-            if(!(audio_val %2000))
+            if(audio_val > AUDIO_H_THRESHOLD)
             {
-                audio_val = 0;
+	            //audio_val = 0;
                 printf("\nHigh Noise Intensity!!!");
                 sprintf(msg_socket.logmsg,"High Audio Intensity : %d !! ", audio_val);
                 api_send_socket_log(msg_socket); 
             }
             else
             {
-                sprintf(msg_socket.logmsg,"Received Audio value is : %d !!", audio_val);
+                sprintf(msg_socket.logmsg,"Received Audio value is : %d", audio_val);
                 api_send_socket_log(msg_socket); 
             }
             api_send_socket_dec(msg_socket);
@@ -251,8 +267,13 @@ enum Status socket_request_hdlr(struct sock_struct recv_msg)
 
 void *app_socket_task(void *args) // SocketThread/Task
 {
-    
+    uint8_t temp_count = 0;
+    uint8_t status;
+    logpacket init_log;
     printf("\nEntered Socket Task\n");   
+    init_log.level = LOG_INIT;
+    strcpy(init_log.logmsg,"Initialized Socket Task");
+    api_send_socket_log(init_log);
     //Connect and establish Socket comm
     while(1)
     {
@@ -267,6 +288,19 @@ void *app_socket_task(void *args) // SocketThread/Task
 		}
 		printf("What I received from client..:%s with size %d\n",sock_val.sock_buff,sock_val.len);
         socket_request_hdlr(sock_val);
+
+        if(sock_flag)
+        {
+            status = mq_receive(hb_sock_queue,(char*)&temp_count, sizeof(counter), NULL);
+            if(status >0)
+            {
+                printf("\nReceive Heartbeat request: %d\n", temp_count);
+                hb_sock_cnt+=1;
+                status=mq_send(hb_sock_queue, (const char*)&hb_sock_cnt, sizeof(counter),1);
+
+            }
+            sock_flag = 0;
+        } 
     }
 }
 
@@ -314,21 +348,36 @@ void *app_sync_logger(void *args) // SocketThread/Task
         logpacket temp; 
         temp.req_type = -1;
         status = mq_receive(log_queue,(logpacket*)&temp, sizeof(temp), NULL);
-        printf("\nLog Status %d\n",status);
         if(temp.logmsg !=NULL)
         {
             if(status >0)
             {
-                printf("\nLog Queue message received\n");
+                
                 if(temp.sourceid == SRC_MAIN)
                 {
+                	printf("\nLog Queue message received from main\n");
                     sprintf(logbuff,"\n[ %ld sec, %ld usecs] MAIN :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
                     strncat(logbuff, temp.logmsg, strlen(temp.logmsg));
                     fwrite(logbuff,1, strlen(logbuff)*sizeof(char),fp);
                 }
                 if(temp.sourceid == SRC_SOCKET)
                 {
-                    sprintf(logbuff,"\n[ %ld sec, %ld usecs] SOCKET :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
+                	printf("\nLog Queue message received from socket\n");
+                	if(temp.level == LOG_INIT)
+                	{
+                		sprintf(logbuff,"\n[ %ld sec, %ld usecs] [BBG-SOCKET Task] :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);	
+                	}
+                	else
+                	{
+                    	sprintf(logbuff,"\n[ %ld sec, %ld usecs] [BBG-TIVA SOCKET] :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
+               	    }
+                    strncat(logbuff, temp.logmsg, strlen(temp.logmsg));
+                    fwrite(logbuff,1, strlen(logbuff)*sizeof(char),fp);
+                }
+                if(temp.sourceid == SRC_DECISION)
+                {
+                	printf("\nLog Queue message received from main\n");
+                    sprintf(logbuff,"\n[ %ld sec, %ld usecs] [BBG-Decision Task] :", temp.time_stamp.tv_sec,temp.time_stamp.tv_usec);
                     strncat(logbuff, temp.logmsg, strlen(temp.logmsg));
                     fwrite(logbuff,1, strlen(logbuff)*sizeof(char),fp);
                 }
@@ -345,7 +394,12 @@ void *app_decision_task(void *args) // SocketThread/Task
     uint8_t status = 0;
     uint32_t audio_val = 0;
     logpacket temp;
+    logpacket init_log;
     printf("\nEntered Decision Task\n");
+    init_log.level = LOG_INIT;
+    uint8_t intensity_change = 0;
+    strcpy(init_log.logmsg,"Initialized Decision Task");
+    api_send_dec_log(init_log);
     while(1)
     {
     	//pthread_cond_wait(&sig_from_socket, &sig_socket_mutex);
@@ -364,13 +418,25 @@ void *app_decision_task(void *args) // SocketThread/Task
                     {
                         printf("\nAudio value in dec is %d\n",audio_val);
                     }
-                    if(audio_val > 2000)
+                    if(audio_val > AUDIO_H_THRESHOLD)
                     {
                         printf("\nGlow LED");
                         dec_led2_on();
+                        bzero(init_log.logmsg,sizeof(init_log.logmsg));
+                        strcpy(init_log.logmsg,"High Noise Intensity!! Glowing USR LED2!");
+                        intensity_change = 1;
+                        api_send_dec_log(init_log);
                     }
                     else
                     {
+                    	if(intensity_change)
+                    	{
+                    		bzero(init_log.logmsg,sizeof(init_log.logmsg));
+                    		strcpy(init_log.logmsg,"Normal Noise Intensity!! Turning OFF USR LED2!");
+                    		api_send_dec_log(init_log);
+                        	intensity_change = 0;
+                        }
+
                         dec_led2_off();
                     }
                 }
@@ -384,6 +450,47 @@ void *app_decision_task(void *args) // SocketThread/Task
     }
 }
 
+
+
+uint8_t monitor_hb_notif()
+{
+    uint32_t usecs_send;
+    //int status;
+    int recvcounter;
+    uint8_t status;
+    
+    usecs_send = 4000000;
+    uint32_t usecs_total = 4000000;
+    uint8_t temp_hb_sock = hb_sock_cnt;
+    status=mq_send(hb_sock_queue, (const char*)&hb_sock_cnt, sizeof(counter),1);
+     
+        sock_flag = 1;
+        if(status == -1)
+        {
+            printf("\nUnable to send Heartbeat Notification\n");
+            exit_handler(SIGINT);
+        }
+        else
+        {
+            printf("\nSuccessfully sent Heartbeat Notification to Light sensor\n");   
+        }
+
+    usleep(usecs_send);  
+        status = mq_receive(hb_sock_queue,(char*)&hb_sock_cnt, sizeof(counter), NULL);
+      
+        if(status >0 && (temp_hb_sock !=hb_sock_cnt))
+        {
+            printf("\nHeartbeat Received from the Light Sensor Task\n");
+        }
+        else
+        { 
+            //printf("\nUnable to fetch Heartbeat\n");
+        }
+
+    usleep(usecs_total);
+    //req_cnt +=1;
+    return 1;
+}
 
 
 int main(int argc, char **argv)
@@ -455,6 +562,8 @@ int main(int argc, char **argv)
     mq_attr_decision_queue.mq_maxmsg = 10;
     mq_attr_decision_queue.mq_msgsize = sizeof(logpacket);
 
+    mq_attr_hb_sock_queue.mq_maxmsg = 10;
+    mq_attr_hb_sock_queue.mq_msgsize = sizeof(counter);
     mq_unlink(LOG_QUEUE);
     log_queue = mq_open(LOG_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_log_queue);
     /*mq_unlink(SCKT_LOG_QUEUE);
@@ -465,6 +574,8 @@ int main(int argc, char **argv)
     pattern_queue = mq_open(PATTERN_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_pattern_queue);
     mq_unlink(DECISION_QUEUE);
     decision_queue = mq_open(DECISION_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_decision_queue);
+    mq_unlink(HB_SOCK_QUEUE);
+    hb_sock_queue = mq_open(HB_SOCK_QUEUE,O_CREAT|O_RDWR|O_NONBLOCK, 0666, &mq_attr_hb_sock_queue);
 
     if(log_queue == -1)
     {
@@ -562,7 +673,11 @@ int main(int argc, char **argv)
     while(1)
     {
         usleep(6000000);
-        strcpy(msg_main.logmsg,"Log From Main");
+        if(!monitor_hb_notif())
+        {
+            break;
+        }
+        strcpy(msg_main.logmsg,"HB Log From Main");
         gettimeofday(&msg_main.time_stamp, NULL);   
         api_send_main_log(msg_main);    
     }
